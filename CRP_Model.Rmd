@@ -1,0 +1,723 @@
+---
+title: "CRP Model"
+author: "Peter Mayfield"
+date: "2025-04-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+&emsp;&emsp;Land cover and the mechanisms that change it influence several ecosystem services including water quality, soil erosion, and habitat construction. Quality of wildlife habitat is one of the myriads of limiting factors influencing wildlife population persistence. Understanding how prevalent mechanisms of land cover occur can provide insight into long-term habitat quality for grassland obligate species. Using a species of conservation concern as a case study, we propose estimating how often haying and grazing occurs to better understand habitat quality across this ecosystem.
+
+&emsp;&emsp;The Conservation Reserve Program (CRP) is a landscape scale restoration program that has been implemented on private lands across the Great Plains and the Intermountain West for grassland restoration. We will estimate the amount of CRP lands that are expected to be emergency hayed or grazed within the lesser prairie-chicken’s range in western Kansas in any given year. Using information provided by the Natural Resource Conservation Service (NRCS), we have information of fields that were emergency hayed or grazed in 2021-2022 as well as the total area of CRP fields that are available within the lesser prairie-chicken range in 2023. Using this information and information from previous research it was predicted that ~1/3 of all CRP fields are eligible to be emergency hayed or grazed any given year in the northern Great Plains (Twidwell et al. 2018). We will estimate the amount of CRP that is available to be emergency hayed or grazed in a given year in our study area using small area estimation on a finer scale than previously observed.
+
+# Loading in the Packages
+
+```{r packages}
+library(dplyr)
+library(sf)
+library(terra)
+library(sp)
+library(ggplot2)
+```
+
+# Get Data
+
+```{r data}
+setwd("~/Desktop/Applied Bayseian Modeling and Prediction")
+CRP_HG_dataset <- read.csv("CRP_HG_dataset_Final.csv")
+counties <- unique(CRP_HG_dataset$county)
+
+county_HG21 <- lapply(counties, function(cty) {CRP_HG_dataset$HG_2021[CRP_HG_dataset$county == cty]})
+names(county_HG21) <- counties
+
+county_HG22 <- lapply(counties, function(cty) {CRP_HG_dataset$HG_2022[CRP_HG_dataset$county == cty]})
+names(county_HG22) <- counties
+```
+
+# Preliminary Model Definition
+
+&emsp;&emsp;Our data consist of binary values with 1 corresponding to true and 0 corresponding to false. In this case, true indicates that a field was reported to be hayed or grazed in the corresponding year and vice versa. This is our data model **(y = z)**, where the data, **y**, are exactly the actual value **z**. Our process model, or the data we wish we had is **[y] ~ Bern(p)** which can be read as the marginal distribution of the data y, is given by a Bernoulli distribution with probability **p**. Finally, our parameter model consists of **[p] ~ Unif(0,1)** where the assumption is that the probability can take on any value within its support.
+
+# MCMC Sampler
+
+&emsp;&emsp;The following MCMC sampler is based on the model. The function is passed the lower and upper bounds of the uniform distribution for p, the data, the number of iterations, and the initial value of the probability. Given these inputs, the function proposes a new probability, uses the Metropolis-Hastings (M-H) ratio to accept or reject the proposed value, and iterates until n trials are complete. Note, the ratio is calculated in logarithmic scale for stability and the data are vectors.
+
+```{r MCMC function}
+MCMC <- function(lower, upper, data, n, init){
+  p <- matrix(,n,1)
+    k <- 1
+    p[1] <- init
+    for(k in 2:n){
+      p.star <- runif(1, lower, upper)
+      mh1 <- log(prod(dbinom(data, 1, p.star))*dunif(p.star, lower, upper))
+      mh2 <- log(prod(dbinom(data, 1, p[k-1]))*dunif(p[k-1], lower, upper))
+      mh <- exp(mh1 - mh2)
+      keep <- ifelse(mh > 1, 1, rbinom(1, 1, mh))
+      p[k] <- ifelse(keep, p.star, p[k-1])
+    }
+  return(p);
+}
+```
+
+# Preliminary Model Implementation
+
+```{r 2021 Data, fig.align='center'}
+
+# set number of iterations; create matrix to store posterior
+n <- 30000
+post21 <- matrix(,length(county_HG21), n)
+burn.in <- 5000;
+# iterate through all counties individually; plot results
+for(i in 1:length(county_HG21)){
+  post21[i,] <- MCMC(0, 1, county_HG21[[i]], n, 0.1)
+}
+hist(post21[1,burn.in:n], freq = FALSE, xlab = "[p|y]", ylab = "Density", main = paste(counties[1], "21"))
+```
+
+# Summary Statistics for 2021
+
+```{r Summary metrics}
+# calculate summary metrics
+summarypost21 <- matrix(,4,length(counties))
+summarypost21[1,] <- counties
+summarypost21[2,] <- rowMeans(post21)
+for(i in 1:length(counties)) {
+summarypost21[c(3, 4),i] <- quantile(post21[i,], probs=c(0.025, 0.975))
+}
+```
+
+# Model Results for 2022
+
+```{r 2022 Data, fig.cap = 'Figure 2: Example Histogram for a Single County', fig.align='center'}
+post22 <- matrix(,length(county_HG22), n)
+burn.in <- 5000;
+for(i in 1:length(county_HG22)){
+  post22[i,] <- MCMC(0, 1, county_HG22[[i]], n, 0.1)
+}
+hist(post22[1,burn.in:n], freq = FALSE, main = paste(counties[1], "22"))
+```
+
+# Summary Statistics for 2022
+
+```{r 2022 Summary Statistics}
+summarypost22 <- matrix(,4,length(counties))
+summarypost22[1,] <- counties
+summarypost22[2,] <- rowMeans(post22)
+for(i in 1:length(counties)) {
+  summarypost22[c(3, 4),i] <- quantile(post22[i,], probs=c(0.025, 0.975))
+}
+```
+
+# Raster Creation
+
+```{r Raster, results = 'hide'}
+##
+## Grab Files
+##
+
+unzip("Bayes_Final_Shapefiles.zip")
+sf.ks <- vect("KS_counties.shp")
+sf.ks <- project(sf.ks, "EPSG:32614")
+rast(sf.ks)
+
+sf.lpc <- vect("LPC_range_ks.shp")
+rast(sf.lpc)
+
+sf.kslpc <- rbind(sf.lpc, sf.ks)
+
+##
+## Create and populate raster
+##
+
+r_data21 <- rep(NA, ncell(sf.ks$name))
+index <- matrix(,length(sf.ks$name),1)
+index <- match(sf.ks$name, summarypost21[1,])
+r_data21 <- data.frame(sf.ks$name)
+for(i in 1:length(index)) {
+  if(is.na(index[i]))
+  {
+    r_data21[i,2:4] <- NA
+  } else {
+    r_data21[i,2] <- summarypost21[2, index[i]]
+    r_data21[i,3] <- summarypost21[3, index[i]]
+    r_data21[i,4] <- summarypost21[4, index[i]]
+  }
+}
+names(r_data21) <- c("names", "expected", "lowerci", "upperci")
+r_data21$expected <- as.numeric(r_data21$expected)
+r_data21$lowerci <- as.numeric(r_data21$lowerci)
+r_data21$upperci <- as.numeric(r_data21$upperci)
+
+##
+## Assign data to raster pixels
+##
+
+countyraster21 <- sf.ks
+values(countyraster21) <- r_data21
+squareraster21 <- countyraster21[countyraster21$names %in% counties,]
+cropraster21 <- intersect(squareraster21, sf.lpc)
+
+##
+## 2022 Data below
+##
+
+r_data22 <- rep(NA, ncell(sf.ks$name))
+index <- matrix(,length(sf.ks$name),1)
+index <- match(sf.ks$name, summarypost22[1,])
+r_data22 <- data.frame(sf.ks$name)
+for(i in 1:length(index)) {
+  if(is.na(index[i]))
+  {
+    r_data22[i,2:4] <- NA
+  } else {
+    r_data22[i,2] <- summarypost22[2, index[i]]
+    r_data22[i,3] <- summarypost22[3, index[i]]
+    r_data22[i,4] <- summarypost22[4, index[i]]
+  }
+}
+names(r_data22) <- c("names", "expected", "lowerci", "upperci")
+r_data22$expected <- as.numeric(r_data22$expected)
+r_data22$lowerci <- as.numeric(r_data22$lowerci)
+r_data22$upperci <- as.numeric(r_data22$upperci)
+
+countyraster22 <- sf.ks
+values(countyraster22) <- r_data22
+squareraster22 <- countyraster22[countyraster22$names %in% counties,]
+cropraster22 <- intersect(squareraster22, sf.lpc)
+
+```
+
+# Raster Plots {.tabset}
+Click through the tabs for different metrics.
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(squareraster21, "expected", type="continuous", main="Expected Value 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(squareraster21, "lowerci",type = "continuous", main="Lower Confidence Interval 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(squareraster21, "upperci", type="continuous", main="Upper Confidence Interval 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(squareraster22, "expected", type="continuous", main="Expected Value 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(squareraster22, "lowerci", type="continuous", main="Lower Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(squareraster22, "upperci", type="continuous", main="Upper Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+# Cropped Raster Plots {.tabset}
+The following rasters are cropped to the estimated occupied range of the Lesser Prairie Chicken.
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(cropraster21, "expected", type="continuous", main="Expected Value 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(cropraster21, "lowerci",type = "continuous", main="Lower Confidence Interval 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(cropraster21, "upperci", type="continuous", main="Upper Confidence Interval 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(cropraster22, "expected", type="continuous", main="Expected Value 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(cropraster22, "lowerci", type="continuous", main="Lower Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(cropraster22, "upperci", type="continuous", main="Upper Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+# New Model
+
+&emsp;&emsp;After fitting the Preliminary Model, a finer resolution was pursued. To implement this, the model needed to be adapted to include more assumptions as the data were fewer the finer the resolution. Building off of the preliminary model, we now create a new Data Model defined as **[z~ij~|p~j~] ~ Bern(p~j~)**. This can be interpreted as the probability that the "ith" field in the "jth" county given the probability that any field within the "jth" county is hayed or grazed. The process model is now the marginal distribution of the p~j~s, or **[p~j~] ~ Beta~rp~($\mu$, $\phi$)**. Here, Beta~rp~ is a reparameterization of the Beta distribution such that it has an expected value $\mu$ and dispersion $\phi$. Finally, our parameter model now consists of two parameters, $\mu$ and $\phi$. Given that the event of haying or grazing is unlikely, we assume the distribution to be **[$\mu$] ~ Beta(1,3)**. For $\phi$, any uninformative prior will do and we chose **[$\phi$] ~ Unif(0, 1e6)**.
+
+# New Functions
+
+&emsp;&emsp;Due to the use of a reparameterization of the Beta distribution, we must write some simple r functions to sample from and get the density of these new distributions. All these functions do is convert $\mu$ and $\phi$ back into $\alpha$ and $\beta$. $\alpha$ is equal to $\mu$ * $\phi$, and $\beta$ is equal to (1 - $\mu$) * $\phi$. Once these conversions are complete, the base r functions are called.
+
+```{r New Functions}
+drawbeta <- function(n, mu, phi) {
+  # Function for reparameterized beta distribution with expected value mu and dispersion phi
+  # Inputs n - number of trials, mu - expected value, and phi - dispersion
+  ifelse(((0 <= mu) && (mu <= 1)), NA, stop("Mu out of range", call. = FALSE))
+  ifelse(phi > 0, NA, stop("Phi out of range", call. = FALSE))
+  alpha = mu * phi # alpha in terms of new parameters
+  beta = (1 - mu)*phi # beta in terms of new parameters
+  return(rbeta(n, alpha, beta)) # use base r function for draws
+}
+
+densbeta <- function(x, mu, phi) {
+  # Function for reparameterized beta distribution with expected value mu and dispersion phi
+  # Inputs x - quantiles, mu - expected value, and phi - dispersion
+  ifelse(((0 <= mu) && (mu <= 1)), NA, stop("Mu out of range", call. = FALSE))
+  ifelse(phi > 0, NA, stop("Phi out of range", call. = FALSE))
+  alpha <- mu * phi # alpha in terms of new parameters
+  beta <- (1 - mu) * phi # beta in terms of new parameters
+  return(dbeta(x, alpha, beta)) # use base r function for density
+}
+```
+
+# New MCMC Sampler
+
+&emsp;&emsp;New model means new MCMC sampler. First, we write out Bayes Rule to get an idea of what we want to sample. The distribution that we want is $[p_j, \mu, \phi|z_{ij}]$. Applying Bayes Rule, we obtain $\prod_{j=1}^{J} \prod_{i=1}^{n_{j}} \frac{[z_{ij}|p_{j}][p_{j}|\mu,\phi][\mu][\phi]}{[z_{ij}]}$. Metropolis-Hastings says we can remove the denominator and obtain a distribution proportional to the posterior, or $[p_{j},\mu,\phi|z_{ij}]\alpha\prod_{j=1}^{J} \prod_{i=1}^{n_{j}}[z_{ij}|p_{j}][p_{j}|\mu,\phi][\mu][\phi]$. Creating our MH ratios, we can simply eliminate any variable that does not change through iterations. For example, to obtain $[\mu^{k-1}|\mu^{*}]$ we compare $\frac{[p_j|\mu^*,\phi][\mu^*]}{[p_j|\mu^{k-1},\phi][\mu^{k-1}]}$. Any distribution that does not contain $\mu$ will cancel. This is first iterated within a county using a vector of data corresponding to all fields with data in the county. Then, using the probability from the county level data, the field level distributions are sampled using a single value rather than a vector.
+
+```{r Small Area MCMC}
+
+smallAreaMCMC <- function(data, n, burn.in, mu.init, phi.init, p.init) {
+  ## MCMC Sampler for model
+  ## Inputs: data - vector of 1s and 0s, n - number of MCMC iterations, burn.in - number of MCMC samples to truncate,
+  ## mu.init - initial value for mu, phi.init - initial value of phi, and p.init - initial value of p
+  
+  ## Pre-allocate
+  mu <- matrix(,n,1)
+  phi <- matrix(,n,1)
+  p <- matrix(,n,1)
+  
+  ## Initial Values
+  mu[1] <- mu.init
+  phi[1] <- phi.init
+  p[1] <- p.init
+  k <- 1
+  
+  countyData <- data[!is.na(data)]
+  
+  for(k in 2:n) {
+    ## This loop is COUNTY LEVEL, uses vectors
+    ## Draws from proposal distributions
+    mu.star <- rbeta(1, 1, 3)
+    phi.star <- runif(1, 0, 1e6)
+    p.star <- drawbeta(1, mu.star, phi.star)
+    
+    ## Numerator of M-H ratio
+    mh.mu1 <- densbeta(p[k-1], mu.star, phi[k-1]) * dbeta(mu.star, 1, 3)
+    ## Denominator of M-H ratio
+    mh.mu2 <- densbeta(p[k-1], mu[k-1], phi[k-1]) * dbeta(mu[k-1], 1, 3)
+    ## Avoid divide by 0
+    mh.mu1 <- ifelse(mh.mu1 == 0, 0, log(mh.mu1))
+    mh.mu2 <- ifelse(mh.mu2 == 0, 0, log(mh.mu2))
+    ## Ln division
+    mh.mu <- exp(mh.mu1 - mh.mu2)
+    ## Better or not? If not, bern with probability mh
+    keep <- ifelse(mh.mu > 1, 1, rbinom(1, 1, mh.mu))
+    mu[k,] <- ifelse(keep == 1, mu.star, mu[k-1])
+    
+    mh.phi1 <- densbeta(p[k-1], mu[k-1], phi.star) * dunif(phi.star, 0, 1e6)
+    mh.phi2 <- densbeta(p[k-1], mu[k-1], phi[k-1]) * dunif(phi[k-1], 0, 1e6)
+    mh.phi1 <- ifelse(mh.phi1 == 0, 0, log(mh.phi1))
+    mh.phi2 <- ifelse(mh.phi2 == 0, 0, log(mh.phi2))
+    mh.phi <- exp(mh.phi1 - mh.phi2)
+    keep <- ifelse(mh.phi > 1, 1, rbinom(1, 1, mh.phi))
+    phi[k,] <- ifelse(keep == 1, phi.star, phi[k-1])
+    
+    mh.p1 <- prod(dbinom(countyData, 1, p.star)) * densbeta(p.star, mu[k-1], phi[k-1])
+    mh.p2 <- prod(dbinom(countyData, 1, p[k-1])) * densbeta(p[k-1], mu[k-1], phi[k-1])
+    mh.p1 <- ifelse(mh.p1 == 0, 0, log(mh.p1))
+    mh.p2 <- ifelse(mh.p2 == 0, 0, log(mh.p2))
+    mh.p <- exp(mh.p1 - mh.p2)
+    keep <- ifelse(mh.p > 1, 1, rbinom(1, 1, mh.p))
+    p[k] <- ifelse(keep == 1, p.star, p[k-1])
+  }
+  
+  ## Remember the county distribution
+  countyP <- p
+  ## Use final values from county distribution as initial value for field level distribution
+  mu.init <- mu[n]
+  phi.init <- phi[n]
+  p.init <- p[n]
+  ## County level means
+  pj <- mean(p[burn.in:n])
+  ## Pre-allocate
+  store <- matrix(,n,length(countyData))
+  cis.out <- matrix(,n,2)
+  
+  for(i in 1:length(countyData)) {
+    ## This loop is FIELD LEVEL uses single data points
+    ## Pre-allocate
+    mu <- matrix(,n,1)
+    phi <- matrix(,n,1)
+    p <- matrix(,n,1)
+    
+    ## Initial values
+    mu[1] <- mu.init
+    phi[1] <- phi.init
+    p[1] <- p.init
+    k <- 1
+    
+    for(k in 2:n) {
+      ## Draws from proposal distributions
+      mu.star <- rbeta(1, 1, 3)
+      phi.star <- runif(1, 0, 1e6)
+      p.star <- drawbeta(1, mu.star, phi.star)
+      
+      mh.mu1 <- densbeta(p[k-1], mu.star, phi[k-1]) * dbeta(mu.star, 1, 3)
+      mh.mu2 <- densbeta(p[k-1], mu[k-1], phi[k-1]) * dbeta(mu[k-1], 1, 3)
+      mh.mu1 <- ifelse(mh.mu1 == 0, 0, log(mh.mu1))
+      mh.mu2 <- ifelse(mh.mu2 == 0, 0, log(mh.mu2))
+      mh.mu <- exp(mh.mu1 - mh.mu2)
+      keep <- ifelse(mh.mu > 1, 1, rbinom(1, 1, mh.mu))
+      mu[k,] <- ifelse(keep == 1, mu.star, mu[k-1])
+      
+      mh.phi1 <- densbeta(p[k-1], mu[k-1], phi.star) * dunif(phi.star, 0, 1e6)
+      mh.phi2 <- densbeta(p[k-1], mu[k-1], phi[k-1]) * dunif(phi[k-1], 0, 1e6)
+      mh.phi1 <- ifelse(mh.phi1 == 0, 0, log(mh.phi1))
+      mh.phi2 <- ifelse(mh.phi2 == 0, 0, log(mh.phi2))
+      mh.phi <- exp(mh.phi1 - mh.phi2)
+      keep <- ifelse(mh.phi > 1, 1, rbinom(1, 1, mh.phi))
+      phi[k,] <- ifelse(keep == 1, phi.star, phi[k-1])
+      
+      mh.p1 <- dbinom(countyData[i], 1, p.star) * densbeta(p.star, mu[k-1], phi[k-1])
+      mh.p2 <- dbinom(countyData[i], 1, p[k-1]) * densbeta(p[k-1], mu[k-1], phi[k-1])
+      mh.p1 <- ifelse(mh.p1 == 0, 0, log(mh.p1))
+      mh.p2 <- ifelse(mh.p2 == 0, 0, log(mh.p2))
+      mh.p <- exp(mh.p1 - mh.p2)
+      keep <- ifelse(mh.p > 1, 1, rbinom(1, 1, mh.p))
+      p[k,] <- ifelse(keep, p.star, p[k-1])
+    }
+    store[1:n, i] <- p*pj           ## Store field level distribution given as the product of the county level distributions mean and the field level distribution
+  }
+  return(list(pi = store, pj = countyP))
+}
+
+```
+
+# Testing
+
+&emsp;&emsp;Before implementing the model on a large scale, we first perform some simple model checking. Using a vector to test the model we obtain the following results.
+
+``` {r Testing, fig.align = 'center'}
+testVector <- c(0,1,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0)
+finalTest <- smallAreaMCMC(testVector, 30000, 5000, 0.1, 100, 0.1)
+finalTest$comp <- rbeta(30000, 1, 3)
+```
+
+# Testing Results {.tabset}
+Below are the results for the test vector. First, we look at the results for a single 'field' within the 'county'. Here the 'field' is a single datapoint and the 'county' is the vector of datapoints. Using a few 'common sense' checks, we first consider what we should expect the results to be. Ideally, the resulting histogram will be skewed further towards zero than than the prior distribution for $\mu$.
+
+## **+**
+
+```{r, fig.align = 'center'}
+hist(finalTest$pi[5000:30000,1], main = paste(testVector[1]), freq = FALSE)
+```
+
+## **+**
+
+```{r, fig.align = 'center'}
+hist(finalTest$pi[5000:30000,2], main = paste(testVector[2]), freq = FALSE)
+```
+
+## **+**
+
+```{r, fig.align = 'center'}
+hist(finalTest$pj[5000:30000,], freq = FALSE, main = "Test Vector")
+```
+
+## **+**
+
+```{r, fig.align = 'center'}
+hist(finalTest$comp, freq = FALSE, main = "Parameter Model; mu")
+```
+
+# Model fitting for 2021 data
+
+```{r, Rasters 2021}
+
+pixelsize <- 458
+county_extents <- lapply(1:length(sf.ks), function(i) {ext(sf.ks[i,])})
+names(county_extents) <- sf.ks$name
+finalData21 <- lapply(county_HG21, function(vec) {
+  matrix(NA, nrow = 5, ncol = length(vec))
+})
+
+for (county in names(finalData21)) {
+  # Get the subset of x and y values for this county
+  county_rows_x <- CRP_HG_dataset$utm.x[CRP_HG_dataset$county == county]
+  county_rows_y <- CRP_HG_dataset$utm.y[CRP_HG_dataset$county == county]
+  finalData21[[county]][1, ] <- county_rows_x
+  finalData21[[county]][2, ] <- county_rows_y
+}
+
+finalCountyData21 <- matrix(,3,length(counties))
+colnames(finalCountyData21) <- counties
+
+for(i in 1:length(counties)) {
+  n <- 3000
+  smallAreaResults <- smallAreaMCMC(county_HG21[[i]], n, 500, 0.1, 100, 0.1)
+  fieldMeans <- colMeans(smallAreaResults$pi)
+  fieldUpperCi <- apply(smallAreaResults$pi, 2, quantile, probs = 0.975)
+  fieldLowerCi <- apply(smallAreaResults$pi, 2, quantile, probs = 0.025)
+  areaMeans <- colMeans(smallAreaResults$pj)
+  areaUpperCi <- apply(smallAreaResults$pj, 2, quantile, probs = 0.975)
+  areaLowerCi <- apply(smallAreaResults$pj, 2, quantile, probs = 0.025)
+  smallAreaSummary <- list()
+  smallAreaSummary$means <- fieldMeans
+  smallAreaSummary$upperCi <- fieldUpperCi
+  smallAreaSummary$lowerCi <- fieldLowerCi
+  areaStats <- c(areaMeans, areaUpperCi, areaLowerCi)
+  finalCountyData21[1:3, i] <- areaStats
+  finalData21[[i]][3:5,] <- do.call(rbind, smallAreaSummary)
+}
+
+selected_extents <- county_extents[counties]
+rasters21 <- mapply(function(mat, ext) {
+  # Extract coordinates and data
+  i <- 1
+  x <- mat[1, ]
+  y <- mat[2, ]
+  means <- mat[3, ]
+  upperci <- mat[4, ]
+  lowerci <- mat[5, ]
+  
+  # Create a data.frame
+  df.means <- data.frame(x = x, y = y, value = means)
+  df.upperci <- data.frame(x = x, y = y, value = upperci)
+  df.lowerci <- data.frame(x = x, y = y, value = lowerci)
+  
+  # Remove NA rows
+  df.means <- df.means[complete.cases(df.means), ]
+  df.upperci <- df.upperci[complete.cases(df.upperci), ]
+  df.lowerci <- df.lowerci[complete.cases(df.lowerci), ]
+  
+  # Convert to SpatVector
+  points.means <- vect(df.means, geom = c("x", "y"), crs = "EPSG:32614")
+  points.upperci <- vect(df.upperci, geom = c("x", "y"), crs = "EPSG:32614")
+  points.lowerci <- vect(df.lowerci, geom = c("x", "y"), crs = "EPSG:32614")
+  
+  # Create a raster template (choose resolution)
+  r_template <- rast(ext(ext), resolution = pixelsize, crs = crs(points.means))
+  
+  # Rasterize
+  raster.means <- rasterize(points.means, r_template, field = "value", background = finalCountyData21[1, i])
+  raster.upperci <- rasterize(points.upperci, r_template, field = "value", background = finalCountyData21[2, i])
+  raster.lowerci <- rasterize(points.lowerci, r_template, field = "value", background = finalCountyData21[3, i])
+  
+  raster = c(raster.means, raster.upperci, raster.lowerci)
+  names(raster) = c('means', 'upperci', 'lowerci')
+  i = i + 1
+  return(raster)
+}, finalData21, selected_extents, SIMPLIFY = FALSE)
+
+combinedFinalRaster21 <- do.call(terra::merge, unname(rasters21))
+croppedFinalRaster21 <- crop(combinedFinalRaster21, sf.lpc)
+croppedFinalRaster21 <- mask(croppedFinalRaster21, sf.lpc)
+```
+
+# Field level results 2021 {.tabset}
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(combinedFinalRaster21, "means", type="continuous", main="Expected Value 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(combinedFinalRaster21, "lowerci",type = "continuous", main="Lower Confidence Interval 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(combinedFinalRaster21, "upperci", type="continuous", main="Upper Confidence Interval 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(croppedFinalRaster21, "means", type="continuous", main="Expected Value 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(croppedFinalRaster21, "lowerci", type="continuous", main="Lower Confidence Interval 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(croppedFinalRaster21, "upperci", type="continuous", main="Upper Confidence Interval 2021", xlab='utm lat',ylab= 'utm long')
+```
+
+# Model fitting for 2022
+
+```{r Rasters 2022}
+finalData22 <- lapply(county_HG22, function(vec) {
+  matrix(NA, nrow = 5, ncol = length(vec))
+})
+
+for (county in names(finalData22)) {
+  # Get the subset of x and y values for this county
+  county_rows_x <- CRP_HG_dataset$utm.x[CRP_HG_dataset$county == county]
+  county_rows_y <- CRP_HG_dataset$utm.y[CRP_HG_dataset$county == county]
+  finalData22[[county]][1, ] <- county_rows_x
+  finalData22[[county]][2, ] <- county_rows_y
+}
+
+finalCountyData22 <- matrix(,3,length(counties))
+colnames(finalCountyData22) <- counties
+
+for(i in 1:length(counties)) {
+  n <- 3000
+  smallAreaResults <- smallAreaMCMC(county_HG22[[i]], n, 500, 0.1, 100, 0.1)
+  fieldMeans <- colMeans(smallAreaResults$pi)
+  fieldUpperCi <- apply(smallAreaResults$pi, 2, quantile, probs = 0.975)
+  fieldLowerCi <- apply(smallAreaResults$pi, 2, quantile, probs = 0.025)
+  areaMeans <- colMeans(smallAreaResults$pj)
+  areaUpperCi <- apply(smallAreaResults$pj, 2, quantile, probs = 0.975)
+  areaLowerCi <- apply(smallAreaResults$pj, 2, quantile, probs = 0.025)
+  smallAreaSummary <- list()
+  smallAreaSummary$means <- fieldMeans
+  smallAreaSummary$upperCi <- fieldUpperCi
+  smallAreaSummary$lowerCi <- fieldLowerCi
+  areaStats <- c(areaMeans, areaUpperCi, areaLowerCi)
+  finalCountyData22[1:3, i] <- areaStats
+  finalData22[[i]][3:5,] <- do.call(rbind, smallAreaSummary)
+  
+}
+
+selected_extents <- county_extents[names(finalData22)]
+rasters22 <- mapply(function(mat, ext) {
+  # Extract coordinates and data
+  i <- 1
+  x <- mat[1, ]
+  y <- mat[2, ]
+  means <- mat[3, ]
+  upperci <- mat[4, ]
+  lowerci <- mat[5, ]
+  
+  # Create a data.frame
+  df.means <- data.frame(x = x, y = y, value = means)
+  df.upperci <- data.frame(x = x, y = y, value = upperci)
+  df.lowerci <- data.frame(x = x, y = y, value = lowerci)
+  
+  # Remove NA rows
+  df.means <- df.means[complete.cases(df.means), ]
+  df.upperci <- df.upperci[complete.cases(df.upperci), ]
+  df.lowerci <- df.lowerci[complete.cases(df.lowerci), ]
+  
+  # Convert to SpatVector
+  points.means <- vect(df.means, geom = c("x", "y"), crs = "EPSG:32614")
+  points.upperci <- vect(df.upperci, geom = c("x", "y"), crs = "EPSG:32614")
+  points.lowerci <- vect(df.lowerci, geom = c("x", "y"), crs = "EPSG:32614")
+  
+  # Create a raster template (choose resolution)
+  r_template <- rast(ext(ext), resolution = pixelsize, crs = crs(points.means))
+  
+  # Rasterize
+  raster.means <- rasterize(points.means, r_template, field = "value", background = finalCountyData22[1, i])
+  raster.upperci <- rasterize(points.upperci, r_template, field = "value", background = finalCountyData22[2, i])
+  raster.lowerci <- rasterize(points.lowerci, r_template, field = "value", background = finalCountyData22[3, i])
+  
+  raster = c(raster.means, raster.upperci, raster.lowerci)
+  names(raster) = c('means', 'upperci', 'lowerci')
+  i = i + 1
+  return(raster)
+}, finalData22, selected_extents, SIMPLIFY = FALSE)
+
+combinedFinalRaster22 <- do.call(terra::merge, unname(rasters22))
+croppedFinalRaster22 <- crop(combinedFinalRaster22, sf.lpc)
+croppedFinalRaster22 <- mask(croppedFinalRaster22, sf.lpc)
+```
+
+# Field level results 2022 {.tabset}
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(combinedFinalRaster22, "means", type="continuous", main="Expected Value 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(combinedFinalRaster22, "lowerci",type = "continuous", main="Lower Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(combinedFinalRaster22, "upperci", type="continuous", main="Upper Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(croppedFinalRaster22, "means", type="continuous", main="Expected Value 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(croppedFinalRaster22, "lowerci", type="continuous", main="Lower Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(croppedFinalRaster22, "upperci", type="continuous", main="Upper Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+# Field level results 2022 for single county {.tabset}
+Finally, let us look at the field level results on a finer scale.
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(rasters22$Trego, "means", type="continuous", main="Expected Value 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(rasters22$Trego, "lowerci", type="continuous", main="Lower Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
+
+## **+**
+
+```{r, fig.align='center'}
+terra::plot(rasters22$Trego, "upperci", type="continuous", main="Upper Confidence Interval 2022", xlab='utm lat',ylab= 'utm long')
+```
